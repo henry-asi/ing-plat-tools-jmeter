@@ -1,0 +1,307 @@
+name: Performance Test Backend (Load / Stress)
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      repository:
+        description: "Nombre del repositorio backend"
+        required: true
+        type: string
+
+      branch:
+        description: "Rama del backend"
+        required: true
+        default: "main"
+        type: string
+
+      test_type:
+        description: "Tipo de prueba: load (carga constante) o stress (escalones hasta encontrar el limite)"
+        required: true
+        default: "load"
+        type: choice
+        options:
+          - load
+          - stress
+
+      requests_json:
+        description: "Requests a probar en formato JSON"
+        required: true
+        default: '[{"name":"Health","method":"GET","path":"/actuator/health"}]'
+        type: string
+
+      threads:
+        description: "[load] Usuarios concurrentes"
+        required: true
+        default: 100
+        type: number
+
+      rampup:
+        description: "[load] Ramp-up en segundos"
+        required: true
+        default: 30
+        type: number
+
+      duration:
+        description: "[load] Duracion de la prueba en segundos"
+        required: true
+        default: 120
+        type: number
+
+      start_threads:
+        description: "[stress] Usuarios del primer escalon"
+        required: true
+        default: 50
+        type: number
+
+      step_threads:
+        description: "[stress] Usuarios que se suman en cada escalon"
+        required: true
+        default: 50
+        type: number
+
+      max_threads:
+        description: "[stress] Maximo de usuarios (ultimo escalon)"
+        required: true
+        default: 400
+        type: number
+
+      step_rampup:
+        description: "[stress] Segundos que tarda cada escalon en incorporar sus usuarios"
+        required: true
+        default: 10
+        type: number
+
+      step_duration:
+        description: "[stress] Duracion de cada escalon en segundos (incluye su rampa)"
+        required: true
+        default: 60
+        type: number
+
+      recovery_duration:
+        description: "[stress] Segundos finales con solo los usuarios del primer escalon (recuperacion)"
+        required: true
+        default: 60
+        type: number
+
+      app_port:
+        description: "Puerto de la aplicacion"
+        required: true
+        default: 8080
+        type: number
+
+      max_error_rate:
+        description: "Porcentaje maximo de errores"
+        required: true
+        default: 5
+        type: number
+
+      max_avg_response_time:
+        description: "Tiempo promedio maximo permitido (ms)"
+        required: true
+        default: 2000
+        type: number
+
+      max_p95_response_time:
+        description: "P95 maximo permitido (ms)"
+        required: true
+        default: 4000
+        type: number
+
+
+permissions:
+  contents: read
+
+
+concurrency:
+  group: stress-test-${{ inputs.repository }}
+  cancel-in-progress: false
+
+
+jobs:
+
+  stress-test:
+
+    name: ${{ inputs.test_type }} test - ${{ inputs.repository }}
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+    env:
+
+      # ==============================================
+      # Backend
+      # ==============================================
+
+      BACKEND_REPOSITORY: ${{ inputs.repository }}
+
+      BACKEND_DIR: ${{ github.workspace }}/backend
+
+      APP_PORT: ${{ inputs.app_port }}
+
+      JAVA_VERSION: "25"
+
+
+      # ==============================================
+      # JMeter
+      # ==============================================
+
+      JMETER_VERSION: "5.6.3"
+
+      TEST_TYPE: ${{ inputs.test_type }}
+
+      THREADS: ${{ inputs.threads }}
+
+      RAMPUP: ${{ inputs.rampup }}
+
+      DURATION: ${{ inputs.duration }}
+
+      START_THREADS: ${{ inputs.start_threads }}
+
+      STEP_THREADS: ${{ inputs.step_threads }}
+
+      MAX_THREADS: ${{ inputs.max_threads }}
+
+      STEP_RAMPUP: ${{ inputs.step_rampup }}
+
+      STEP_DURATION: ${{ inputs.step_duration }}
+
+      RECOVERY_DURATION: ${{ inputs.recovery_duration }}
+
+      REQUESTS_JSON: ${{ inputs.requests_json }}
+
+
+      # ==============================================
+      # Quality Gate
+      # ==============================================
+
+      MAX_ERROR_RATE: ${{ inputs.max_error_rate }}
+
+      MAX_AVG_RESPONSE_TIME: ${{ inputs.max_avg_response_time }}
+
+      MAX_P95_RESPONSE_TIME: ${{ inputs.max_p95_response_time }}
+
+
+      # ==============================================
+      # Directorios internos
+      # ==============================================
+
+      RUNTIME_DIR: ${{ github.workspace }}/runtime
+
+      RESULT_DIR: ${{ github.workspace }}/results
+
+
+    steps:
+
+      # ==================================================
+      # 1. REPOSITORIO CENTRAL
+      # ==================================================
+
+      - name: Checkout repositorio central
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+
+      # ==================================================
+      # 2. BACKEND OBJETIVO
+      # ==================================================
+
+      - name: Checkout backend
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.repository }}
+          ref: ${{ inputs.branch }}
+          token: ${{ secrets.TOKEN_GITHUB_BE }}
+          path: backend
+          persist-credentials: false
+
+
+      # ==================================================
+      # 3. JAVA
+      # ==================================================
+
+      - name: Configurar Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+
+
+      # ==================================================
+      # 4. PERMISOS
+      # ==================================================
+
+      - name: Preparar scripts
+        shell: bash
+        run: |
+          chmod +x scripts/*.sh
+
+
+      # ==================================================
+      # 5. BUILD + START + WAIT
+      # ==================================================
+
+      - name: Compilar y levantar backend
+        shell: bash
+        run: |
+          scripts/backend.sh start
+
+
+      # ==================================================
+      # 6. JMETER
+      # ==================================================
+
+      - name: Ejecutar prueba de ${{ inputs.test_type }}
+        shell: bash
+        run: |
+          scripts/jmeter.sh
+
+
+      # ==================================================
+      # 7. DETENER BACKEND
+      # ==================================================
+
+      - name: Detener backend
+        if: always()
+        shell: bash
+        run: |
+          scripts/backend.sh stop
+
+
+      # ==================================================
+      # 8. LOGS EN CASO DE ERROR
+      # ==================================================
+
+      - name: Mostrar logs si ocurre un error
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f "${RUNTIME_DIR}/application.log" ]; then
+
+            echo "=========================================="
+            echo "       APPLICATION LOG"
+            echo "=========================================="
+
+            tail -n 300 "${RUNTIME_DIR}/application.log"
+
+          fi
+
+
+      # ==================================================
+      # 9. RESULTADOS
+      # ==================================================
+
+      - name: Publicar resultados
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.test_type }}-test-${{ inputs.repository }}-${{ github.run_number }}
+          path: |
+            results/
+            runtime/
+          retention-days: 7
+          if-no-files-found: warn
